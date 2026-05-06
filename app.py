@@ -1,6 +1,9 @@
 import datetime
+import json
+from pathlib import Path
 
 import pandas as pd
+import plotly.express as px
 import streamlit as st
 import yfinance as yf
 import requests
@@ -14,9 +17,9 @@ except LookupError:
     nltk.download('vader_lexicon', quiet=True)
 
 st.set_page_config(page_title="Stock Dashboard", layout="wide")
-st.title("Stock Dashboard: วิเคราะห์หุ้น 3 กลุ่ม")
+st.title("Stock Dashboard")
 st.markdown(
-    "เปรียบเทียบราคาหุ้นกลุ่ม Biotech, Tech-semicon และ Mining โดยดึงข้อมูลจาก `yfinance`"
+    "เปรียบเทียบราคาหุ้นและจัดการ watchlist ของคุณ โดยดึงข้อมูลจาก `SET` สำหรับหุ้นไทย และ `yfinance` สำหรับหุ้นต่างประเทศ"
 )
 
 GROUPS = {
@@ -46,7 +49,74 @@ GROUPS = {
         "TSLA",
     ],
     "Mining": ["FCX", "AG", "RIO"],
+    "SET (ตลาดหุ้นไทย)": [
+        "PTT.BK",
+        "AOT.BK",
+        "KBANK.BK",
+        "SCB.BK",
+        "SCC.BK",
+        "CPALL.BK",
+        "ADVANC.BK",
+        "BANPU.BK",
+        "CPN.BK",
+        "BAM.BK",
+    ],
 }
+
+THAI_TICKERS_AUTO = {
+    "PTT", "AOT", "KBANK", "SCB", "SCC", "CPALL", "ADVANC", "BANPU", "CPN", "BAM",
+    "KTB", "BBL", "TMB", "TRUE", "JAS", "HMPRO", "BEM", "COM7", "BDMS",
+    "CENTEL", "CRC", "EA", "BH", "MINT", "SCBX", "LH", "BGRIM", "GULF",
+}
+
+SET_BASE_URL = "https://www.set.or.th"
+DEFAULT_GROUPS = set(GROUPS.keys())
+GROUPS_FILE = Path(__file__).resolve().parent / "groups.json"
+
+
+def normalize_ticker_input(text):
+    """แปลง input เป็นรายการ ticker ที่เป็นตัวพิมพ์ใหญ่"""
+    if not text:
+        return []
+    tickers = [t.strip().upper() for t in text.replace(";", ",").replace("\n", ",").split(",")]
+    normalized = []
+    for ticker in tickers:
+        if not ticker:
+            continue
+        if "." not in ticker and ticker in THAI_TICKERS_AUTO:
+            normalized.append(f"{ticker}.BK")
+        else:
+            normalized.append(ticker)
+    return normalized
+
+
+def load_groups_from_disk():
+    if not GROUPS_FILE.exists():
+        save_groups_to_disk(GROUPS)
+        return {name: list(items) for name, items in GROUPS.items()}
+
+    try:
+        with GROUPS_FILE.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError("Invalid group file format")
+        return {str(name): [str(ticker).upper() for ticker in tickers] for name, tickers in data.items()}
+    except Exception:
+        save_groups_to_disk(GROUPS)
+        return {name: list(items) for name, items in GROUPS.items()}
+
+
+def save_groups_to_disk(groups):
+    safe_groups = {str(name): [str(ticker).upper() for ticker in tickers] for name, tickers in groups.items()}
+    GROUPS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with GROUPS_FILE.open("w", encoding="utf-8") as f:
+        json.dump(safe_groups, f, indent=2, ensure_ascii=False)
+
+
+def get_group_store():
+    if "groups" not in st.session_state:
+        st.session_state["groups"] = load_groups_from_disk()
+    return st.session_state["groups"]
 
 
 # ============= Technical Indicators Functions =============
@@ -125,32 +195,53 @@ def load_sentiment_model():
     return SentimentIntensityAnalyzer()
 
 
+DEFAULT_YAHOO_FINANCE_API_KEY = "Sh2JBbbtk2HCBGenvZt8JPpFJMoHB73u"
+
+
+def get_yahoo_finance_api_key():
+    return st.secrets.get("YAHOO_FINANCE_API_KEY", DEFAULT_YAHOO_FINANCE_API_KEY)
+
+
 def fetch_news(ticker, api_key=None):
     """
-    ดึงข่าวล่าสุดจาก News API
+    ดึงข่าวล่าสุดจาก Yahoo Finance ผ่าน RapidAPI
     """
     if api_key is None:
-        api_key = st.secrets.get("NEWS_API_KEY", "")
+        api_key = get_yahoo_finance_api_key()
     
     if not api_key:
         return []
-    
+
+    url = "https://apidojo-yahoo-finance-v1.p.rapidapi.com/stock/v2/get-news"
+    params = {
+        "category": ticker,
+        "region": "US"
+    }
+    headers = {
+        "X-RapidAPI-Key": api_key,
+        "X-RapidAPI-Host": "apidojo-yahoo-finance-v1.p.rapidapi.com"
+    }
+
     try:
-        url = "https://newsapi.org/v2/everything"
-        params = {
-            "q": ticker,
-            "sortBy": "publishedAt",
-            "language": "en",
-            "pageSize": 5,
-            "apiKey": api_key
-        }
-        response = requests.get(url, params=params, timeout=5)
-        
+        response = requests.get(url, params=params, headers=headers, timeout=7)
         if response.status_code == 200:
-            articles = response.json().get("articles", [])
-            return articles
-        else:
-            return []
+            data = response.json()
+            result = data.get("items") or data.get("data") or []
+            articles = []
+            for item in result:
+                if isinstance(item, dict):
+                    title = item.get("title") or item.get("providerPublishTime") or ""
+                    link = item.get("link") or item.get("url") or ""
+                    source = item.get("publisher") or item.get("source") or "Yahoo Finance"
+                    summary = item.get("summary") or item.get("description") or ""
+                    articles.append({
+                        "title": title,
+                        "source": {"name": source},
+                        "description": summary,
+                        "url": link,
+                    })
+            return articles[:5]
+        return []
     except Exception as e:
         st.error(f"ข้อผิดพลาดในการดึงข่าว: {e}")
         return []
@@ -207,6 +298,153 @@ def load_financial_statement(ticker_symbol):
         return {}, empty, empty, empty, empty, empty, empty
 
 
+@st.cache_resource
+def get_set_session():
+    session = requests.Session()
+    session.headers.update(
+        {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "th-TH,th;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Referer": f"{SET_BASE_URL}/",
+        }
+    )
+    session.get(SET_BASE_URL, timeout=10)
+    return session
+
+
+def is_thai_ticker(ticker):
+    if not isinstance(ticker, str):
+        return False
+    ticker_upper = ticker.upper()
+    return ticker_upper.endswith(".BK") or ticker_upper in THAI_TICKERS_AUTO
+
+
+def strip_set_suffix(ticker):
+    return ticker.upper().replace(".BK", "")
+
+
+@st.cache_data(ttl=3600)
+def fetch_set_stock_chart(symbol, period="1Y"):
+    try:
+        session = get_set_session()
+        response = session.get(
+            f"{SET_BASE_URL}/api/set/stock/{symbol}/chart-quotation",
+            params={"period": period},
+            timeout=10,
+        )
+        response.raise_for_status()
+        return response.json()
+    except Exception:
+        return {}
+
+
+def parse_set_chart_to_df(chart_data, ticker):
+    quotations = chart_data.get("quotations") or []
+    if not quotations:
+        return pd.DataFrame()
+    df = pd.DataFrame(quotations)
+    if df.empty or "price" not in df.columns:
+        return pd.DataFrame()
+
+    date_key = "localDatetime" if "localDatetime" in df.columns else "datetime"
+    df.index = pd.to_datetime(df[date_key], errors="coerce")
+    if hasattr(df.index, "tz") and df.index.tz is not None:
+        df.index = df.index.tz_convert(None)
+    df = df.sort_index()
+    df = df[["price"]].rename(columns={"price": ticker})
+    return df
+
+
+def choose_set_period(start, end):
+    days = (end - start).days if isinstance(start, datetime.date) and isinstance(end, datetime.date) else 365
+    if days <= 1:
+        return "1D"
+    if days <= 31:
+        return "1M"
+    return "1Y"
+
+
+@st.cache_data(ttl=3600)
+def load_set_price_history(ticker, start, end, price_type):
+    symbol = strip_set_suffix(ticker)
+    period = choose_set_period(start, end)
+    chart_data = fetch_set_stock_chart(symbol, period)
+    df = parse_set_chart_to_df(chart_data, ticker)
+    if df.empty and period != "1Y":
+        chart_data = fetch_set_stock_chart(symbol, "1Y")
+        df = parse_set_chart_to_df(chart_data, ticker)
+
+    if df.empty:
+        return pd.DataFrame()
+
+    start_ts = pd.to_datetime(start)
+    end_ts = pd.to_datetime(end) + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+    df = df.loc[(df.index >= start_ts) & (df.index <= end_ts)]
+
+    if price_type not in ["Close", "Adj Close"]:
+        df[ticker] = df[ticker]
+    return df
+
+
+@st.cache_data(ttl=3600)
+def load_yfinance_prices(tickers, start, end, price_type):
+    raw = yf.download(
+        tickers,
+        start=start,
+        end=end + datetime.timedelta(days=1),
+        progress=False,
+        group_by="ticker",
+        auto_adjust=False,
+        threads=True,
+    )
+
+    if raw.empty:
+        return pd.DataFrame()
+
+    if len(tickers) == 1:
+        ticker = tickers[0]
+        if isinstance(raw.columns, pd.MultiIndex):
+            try:
+                data = raw[ticker][price_type].to_frame()
+            except KeyError:
+                data = raw[[price_type]].copy()
+        else:
+            data = raw[[price_type]].copy()
+        data.columns = pd.MultiIndex.from_product([[ticker], data.columns])
+        return data
+
+    return pd.DataFrame({ticker: raw[ticker][price_type] for ticker in tickers})
+
+
+@st.cache_data(ttl=3600)
+def load_prices(tickers, start, end, price_type):
+    if not tickers:
+        return pd.DataFrame()
+
+    thai_tickers = [ticker for ticker in tickers if is_thai_ticker(ticker)]
+    other_tickers = [ticker for ticker in tickers if ticker not in thai_tickers]
+    frames = []
+
+    if other_tickers:
+        yfinance_frame = load_yfinance_prices(other_tickers, start, end, price_type)
+        if not yfinance_frame.empty:
+            if isinstance(yfinance_frame.columns, pd.MultiIndex):
+                yfinance_frame.columns = [col[0] if isinstance(col, tuple) else col for col in yfinance_frame.columns]
+            frames.append(yfinance_frame)
+
+    for ticker in thai_tickers:
+        set_frame = load_set_price_history(ticker, start, end, price_type)
+        if not set_frame.empty:
+            frames.append(set_frame)
+
+    if not frames:
+        return pd.DataFrame()
+
+    combined = pd.concat(frames, axis=1).sort_index()
+    return combined
+
+
 def get_info_value(info, keys):
     if not isinstance(info, dict):
         return None
@@ -239,9 +477,14 @@ def format_value(value):
         return "-"
     if isinstance(value, (int, float)):
         if abs(value) >= 1_000_000_000:
-            return f"{value/1_000_000_000:.2f}B"
+            short = value / 1_000_000_000
+            return f"{int(short)}B" if short.is_integer() else f"{short:.1f}B"
         if abs(value) >= 1_000_000:
-            return f"{value/1_000_000:.2f}M"
+            short = value / 1_000_000
+            return f"{int(short)}M" if short.is_integer() else f"{short:.1f}M"
+        if abs(value) >= 1_000:
+            short = value / 1_000
+            return f"{int(short)}K" if short.is_integer() else f"{short:.1f}K"
         return f"{value:.2f}"
     return str(value)
 
@@ -252,6 +495,18 @@ def format_ratio(value):
     if isinstance(value, (int, float)):
         return f"{value*100:.2f}%" if abs(value) <= 10 else f"{value:.2f}"
     return str(value)
+
+
+def abbreviate_dataframe(df):
+    if df is None or df.empty:
+        return df
+
+    def abbreviate_value(val):
+        if isinstance(val, (int, float)) and not pd.isna(val):
+            return format_value(val)
+        return val
+
+    return df.astype(object).apply(lambda col: col.map(abbreviate_value))
 
 
 def safe_div(numerator, denominator):
@@ -357,14 +612,95 @@ def build_trend_chart(financials, cashflow):
     return pd.DataFrame()
 
 
+group_store = get_group_store()
+
 with st.sidebar:
-    st.header("ตัวเลือกการวิเคราะห์")
-    selected_group = st.selectbox("เลือกกลุ่มหุ้น", list(GROUPS.keys()))
-    selected_tickers = st.multiselect(
-        "เลือกหุ้น",
-        GROUPS[selected_group],
-        default=GROUPS[selected_group][: min(5, len(GROUPS[selected_group]))],
-    )
+    st.header("Watchlist / กลุ่มหุ้น")
+    st.markdown("กำหนดกลุ่มหุ้นและเพิ่มหุ้นใหม่ได้เอง เพื่อให้เป็น dashboard watchlist ส่วนตัว")
+
+    group_options = list(group_store.keys())
+    if group_options:
+        selected_group = st.selectbox("เลือกกลุ่มหุ้น", group_options)
+    else:
+        selected_group = None
+
+    with st.expander("จัดการกลุ่มหุ้น"):
+        new_group_name = st.text_input("ชื่อกลุ่มใหม่", value="", key="new_group_name")
+        new_group_tickers = st.text_input(
+            "Ticker ของหุ้นในกลุ่มใหม่ (คั่นด้วย ,)",
+            value="",
+            key="new_group_tickers",
+        )
+
+        if st.button("เพิ่มกลุ่มใหม่"):
+            group_name = new_group_name.strip()
+            tickers = normalize_ticker_input(new_group_tickers)
+            if not group_name:
+                st.error("โปรดระบุชื่อกลุ่มก่อน")
+            elif group_name in group_store:
+                st.warning("ชื่อกลุ่มนี้มีอยู่แล้ว กรุณาใช้ชื่ออื่น")
+            else:
+                group_store[group_name] = tickers
+                save_groups_to_disk(group_store)
+                st.success(f"เพิ่มกลุ่ม '{group_name}' เรียบร้อยแล้ว")
+                st.rerun()
+
+        if st.button("ลบกลุ่มนี้"):
+            del group_store[selected_group]
+            save_groups_to_disk(group_store)
+            st.success(f"ลบกลุ่ม '{selected_group}' เรียบร้อยแล้ว")
+            st.rerun()
+
+    st.markdown("---")
+
+    if selected_group is None:
+        st.warning("ยังไม่มีกลุ่มหุ้นในระบบ โปรดสร้างกลุ่มใหม่ก่อน")
+        selected_tickers = []
+    else:
+        selected_tickers = st.multiselect(
+            "เลือกหุ้น",
+            group_store[selected_group],
+            default=group_store[selected_group][: min(5, len(group_store[selected_group]))],
+        )
+
+        if selected_tickers and any(is_thai_ticker(ticker) for ticker in selected_tickers):
+            st.info(
+                "หุ้นไทยจาก SET จะใช้ราคาปิดเป็นข้อมูลหลัก หากเลือกประเภทราคาที่ไม่ใช่ Close หรือ Adj Close ระบบจะยังคงแสดงราคา SET ล่าสุด"
+            )
+
+        with st.expander("เพิ่ม/ลบหุ้นในกลุ่มนี้"):
+            add_ticker = st.text_input("เพิ่ม ticker ใหม่", value="", key="add_ticker")
+            if st.button("เพิ่มหุ้นในกลุ่มนี้"):
+                normalized_tickers = normalize_ticker_input(add_ticker)
+                if not normalized_tickers:
+                    st.error("โปรดระบุ Ticker ก่อน")
+                else:
+                    ticker = normalized_tickers[0]
+                    if ticker in group_store[selected_group]:
+                        st.warning(f"{ticker} อยู่ในกลุ่มนี้แล้ว")
+                    else:
+                        group_store[selected_group].append(ticker)
+                        save_groups_to_disk(group_store)
+                        st.success(f"เพิ่ม {ticker} ในกลุ่ม '{selected_group}' เรียบร้อยแล้ว")
+                        st.rerun()
+
+            remove_tickers = st.multiselect(
+                "เลือกหุ้นเพื่อลบจากกลุ่ม",
+                group_store[selected_group],
+                key="remove_tickers",
+            )
+            if st.button("ลบหุ้นจากกลุ่มนี้"):
+                if remove_tickers:
+                    for ticker in remove_tickers:
+                        if ticker in group_store[selected_group]:
+                            group_store[selected_group].remove(ticker)
+                    save_groups_to_disk(group_store)
+                    st.success(f"ลบหุ้นที่เลือกออกจากกลุ่ม '{selected_group}' เรียบร้อยแล้ว")
+                    st.rerun()
+                else:
+                    st.warning("โปรดเลือกหุ้นอย่างน้อยหนึ่งตัวเพื่อจะลบ")
+
+    st.markdown("---")
     start_date = st.date_input(
         "วันเริ่มต้น",
         value=datetime.date.today() - datetime.timedelta(days=365),
@@ -380,7 +716,7 @@ with st.sidebar:
         ["Adj Close", "Close", "Open", "High", "Low"],
         index=0,
     )
-    
+
     st.markdown("---")
     st.subheader("ตัวเลือกเพิ่มเติม")
     show_technical = st.checkbox("แสดง Technical Indicators", value=True)
@@ -583,21 +919,28 @@ if show_financials:
             yoy_summary = build_yoy_summary(financials, balance_sheet, cashflow)
             if not yoy_summary.empty:
                 with st.expander("สรุปงบปีต่อปี / ไตรมาส"):
-                    st.dataframe(yoy_summary.fillna("-").astype(object))
+                    st.dataframe(abbreviate_dataframe(yoy_summary.fillna("-").astype(object)))
             
             trend_chart = build_trend_chart(financials, cashflow)
             if not trend_chart.empty:
                 with st.expander("กราฟ Revenue / Net Income / Operating Cash Flow"):
-                    st.line_chart(trend_chart)
+                    fig = px.line(
+                        trend_chart.reset_index(),
+                        x=trend_chart.index.name or trend_chart.reset_index().columns[0],
+                        y=trend_chart.columns,
+                        markers=True,
+                    )
+                    fig.update_yaxes(tickformat="~s")
+                    st.plotly_chart(fig, use_container_width=True)
             
             with st.expander("งบกำไรขาดทุน (Financials)"):
-                st.dataframe(financials.fillna("-").astype(object))
+                st.dataframe(abbreviate_dataframe(financials.fillna("-").astype(object)))
             
             with st.expander("งบดุล (Balance Sheet)"):
-                st.dataframe(balance_sheet.fillna("-").astype(object))
+                st.dataframe(abbreviate_dataframe(balance_sheet.fillna("-").astype(object)))
             
             with st.expander("กระแสเงินสด (Cash Flow)"):
-                st.dataframe(cashflow.fillna("-").astype(object))
+                st.dataframe(abbreviate_dataframe(cashflow.fillna("-").astype(object)))
     else:
         summary_rows = []
         for ticker in selected_tickers:
