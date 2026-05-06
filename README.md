@@ -1,6 +1,6 @@
 # Stock Dashboard: วิเคราะห์หุ้น 3 กลุ่ม
 
-Dashboard ที่ใช้ Streamlit สำหรับวิเคราะห์หุ้นจากกลุ่ม Biotech, Tech-semicon และ Mining ด้วยข้อมูลจาก yfinance พร้อมตัวชี้วัดทางเทคนิคและ Sentiment Analysis
+Dashboard ที่ใช้ Streamlit สำหรับวิเคราะห์หุ้นจากกลุ่ม Biotech, Tech-semicon และ Mining ด้วยข้อมูลจาก SET สำหรับหุ้นไทย และ yfinance สำหรับหุ้นต่างประเทศ พร้อมตัวชี้วัดทางเทคนิคและ Sentiment Analysis
 
 ## 🚀 ฟีเจอร์หลัก
 
@@ -37,14 +37,16 @@ venv\Scripts\activate  # Windows
 pip install -r requirements.txt
 ```
 
-### 4. ตั้งค่า News API Key
-- สมัครสมาชิก News API ที่ https://newsapi.org
+### 4. ตั้งค่า Yahoo Finance API Key
+- ใช้ API Key ของ Yahoo Finance ผ่าน RapidAPI
 - เปิดไฟล์ `.streamlit/secrets.toml`
-- แทนที่ `your_api_key_here` ด้วย API Key ของคุณ
+- ตั้งค่าตามตัวอย่าง
 
 ```toml
-NEWS_API_KEY = "your_actual_api_key"
+YAHOO_FINANCE_API_KEY = "Sh2JBbbtk2HCBGenvZt8JPpFJMoHB73u"
 ```
+
+- หากไม่ตั้งค่าไว้ แอปจะใช้ค่าเริ่มต้นที่กำหนดไว้ในโค้ด
 
 ## ▶️ วิธีการใช้งาน
 
@@ -80,10 +82,40 @@ Dashboard ใช้ Hugging Face Transformers (distilbert-base-uncased-finetuned
 - **Streamlit** - Web Framework
 - **yfinance** - ดึงข้อมูลหุ้น
 - **pandas** - Data Manipulation
-- **pandas_ta** - Technical Analysis
-- **requests** - HTTP Library สำหรับ News API
-- **transformers** - AI Model สำหรับ Sentiment Analysis
-- **torch** - Deep Learning Framework
+- **plotly** - วาดกราฟ
+- **nltk** - วิเคราะห์ Sentiment และ Text
+- **requests** - ดึงข่าวจาก News API
+
+## 🇹🇭 รองรับหุ้นไทย
+
+- หุ้นไทยจะดึงข้อมูลราคาจาก SET โดยตรง
+- มีกลุ่ม `SET (ตลาดหุ้นไทย)` สำหรับหุ้นไทยในตลาดหลักทรัพย์ SET
+- ใช้ ticker รูปแบบ `.BK` เช่น `PTT.BK`, `AOT.BK`, `SCB.BK`
+- หากกรอก `PTT`, `AOT`, `SCB` ฯลฯ แอปจะช่วยเติม `.BK` ให้อัตโนมัติ
+
+## 🚀 Deployment
+
+1. **Streamlit Cloud**
+   - สร้าง repository บน GitHub
+   - push โปรเจคนี้ขึ้น GitHub
+   - เปิด https://share.streamlit.io และเชื่อมต่อกับ repository
+   - เลือกไฟล์ `app.py`
+
+2. **Heroku**
+   - สร้างแอปใหม่ใน Heroku
+   - เชื่อม GitHub repository หรือ push ด้วย `git push heroku main`
+   - Heroku จะใช้งาน `Procfile` ที่มีคำสั่ง:
+     ```text
+     web: streamlit run app.py --server.port $PORT --server.address 0.0.0.0
+     ```
+
+3. **Local**
+   - ติดตั้ง deps แล้วรันด้วย:
+     ```bash
+     streamlit run app.py
+     ```
+
+> หากจะส่งให้คนอื่นใช้งาน ให้ส่ง link GitHub หรือ link Streamlit Cloud ที่ deploy แล้ว
 
 ## ⚠️ หมายเหตุ
 
